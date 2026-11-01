@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>荒野酒館 Saloon Showdown</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 30%,#4a3322,#1d130c 70%);font-family:"Trebuchet MS",system-ui,sans-serif;color:#f3e2bf}
+  .device{width:min(560px,96vw);padding:18px 18px 22px;border-radius:26px 26px 60px 60px;
+    background:linear-gradient(160deg,#c7893f,#8c5422 55%,#6b3d17);
+    box-shadow:inset 0 3px 0 #e8b06a,inset 0 -6px 12px #0006,0 18px 40px #000a}
+  .brand{display:flex;justify-content:space-between;align-items:baseline;padding:0 8px 10px;
+    font-weight:900;letter-spacing:2px;color:#2a1608;text-shadow:0 1px 0 #e9b673;font-size:clamp(14px,3.6vw,20px)}
+  .brand span{font-size:.8em;letter-spacing:4px}
+  .bezel{background:#1a1410;padding:12px;border-radius:14px;box-shadow:inset 0 2px 8px #000}
+  canvas{display:block;width:100%;height:auto;border-radius:6px;box-shadow:inset 0 0 12px #0008;touch-action:none}
+  .controls{display:flex;align-items:center;justify-content:space-between;margin-top:18px;padding:0 6px;gap:10px}
+  .pad{display:flex;gap:10px}
+  button{font:inherit;cursor:pointer;border:none;touch-action:manipulation}
+  .arrow{width:clamp(54px,14vw,70px);height:clamp(54px,14vw,70px);border-radius:50%;font-size:22px;color:#2a1608;
+    background:radial-gradient(circle at 35% 30%,#f4e3c0,#b99a68);box-shadow:0 5px 0 #4a2a10,0 7px 10px #0007}
+  .mid{display:flex;flex-direction:column;gap:8px}
+  .small{padding:6px 12px;border-radius:12px;font-size:12px;font-weight:700;letter-spacing:1px;color:#f3e2bf;
+    background:#3b2414;box-shadow:0 3px 0 #1a0d05}
+  .fire{width:clamp(70px,19vw,92px);height:clamp(70px,19vw,92px);border-radius:50%;font-weight:900;font-size:18px;color:#fff3e0;
+    background:radial-gradient(circle at 35% 30%,#f06a4a,#a3200f);box-shadow:0 6px 0 #4d0e05,0 8px 12px #0008}
+  button:active,button.down{transform:translateY(4px);box-shadow:0 1px 0 #1a0d05}
+  .help{margin-top:14px;text-align:center;font-size:12px;line-height:1.6;color:#2a1608;opacity:.85}
+</style>
+</head>
+<body>
+<div class="device">
+  <div class="brand">SALOON SHOWDOWN <span>荒野酒館</span></div>
+  <div class="bezel"><canvas id="lcd" width="480" height="320"></canvas></div>
+  <div class="controls">
+    <div class="pad"><button class="arrow" id="bL">◀</button><button class="arrow" id="bR">▶</button></div>
+    <div class="mid"><button class="small" id="bA">GAME A</button><button class="small" id="bB">GAME B</button></div>
+    <button class="fire" id="bF">FIRE</button>
+  </div>
+  <div class="help">◀ ▶ 移動・空白鍵/Z 開槍・A / B 開始遊戲<br>
+    射倒蒙面槍手，別打到鎮民！槍手舉槍後子彈會沿著那一排飛下來——閃開或把子彈打掉。<br>
+    讓槍手開完槍溜走算 MISS，滿 3 次扣一條命。</div>
+</div>
+<script>
+(() => {
+const cv = document.getElementById('lcd'), ctx = cv.getContext('2d');
+const W = 480, H = 320, INK = '#1e2620', PRINT = '#6b5233', GHOST = 0.07;
+const COLS = [70, 155, 240, 325, 410];
+const SLOT_Y = [178, 92, 178, 92, 178];
+const BULLET_FROM = 248;
+let HI = 0; try { HI = +localStorage.getItem('saloonShowdownHi') || 0; } catch (e) {}
+
+// ---------- sound ----------
+let ac = null;
+function beep(f, d, type = 'square', vol = 0.06) {
+  try {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(g); g.connect(ac.destination); o.start(t); o.stop(t + d + 0.02);
+  } catch (e) {}
+}
+const sfx = {
+  move: () => beep(320, 0.025),
+  shot: () => { beep(1400, 0.04); setTimeout(() => beep(700, 0.05), 30); },
+  bang: () => { beep(180, 0.12, 'sawtooth', 0.08); },
+  kill: () => { beep(880, 0.06); setTimeout(() => beep(1320, 0.08), 70); },
+  parry: () => { beep(2000, 0.05); setTimeout(() => beep(2600, 0.06), 50); },
+  hurt: () => { [500, 380, 260, 160].forEach((f, i) => setTimeout(() => beep(f, 0.12, 'square', 0.08), i * 120)); },
+  tick: () => beep(110, 0.02, 'square', 0.03),
+  appear: () => beep(950, 0.03, 'square', 0.04),
+  aim: () => beep(620, 0.05),
+  miss: () => beep(240, 0.1),
+};
+
+// ---------- state ----------
+let S = { mode: 'title', t: 0 };
+function newGame(b) {
+  S = { mode: 'play', gameB: b, score: 0, lives: 3, miss: 0, col: 2, slots: [null, null, null, null, null],
+        pb: null, eb: [], acc: 0, pacc: 0, eacc: 0, hurt: 0, fire: 0, t: 0, oops: false };
+  beep(660, 0.08); setTimeout(() => beep(990, 0.12), 100);
+}
+const level = () => Math.floor(S.score / 80) + (S.gameB ? 4 : 0);
+const tickMs = () => Math.max(210, 560 - level() * 28);
+
+function hurt() { S.lives--; S.hurt = 1100; sfx.hurt(); }
+function gameOver() {
+  S.mode = 'over'; S.t = 0;
+  if (S.score > HI) { HI = S.score; try { localStorage.setItem('saloonShowdownHi', HI); } catch (e) {} }
+}
+
+function bulletsCross() {
+  if (!S.pb) return false;
+  for (let i = 0; i < S.eb.length; i++) {
+    const e = S.eb[i];
+    if (e.c === S.pb.c && 2 - e.e <= S.pb.s) {
+      S.eb.splice(i, 1); S.pb = null; S.score += 3; sfx.parry(); return true;
+    }
+  }
+  return false;
+}
+
+function fire() {
+  if (S.mode !== 'play' || S.hurt > 0 || S.pb) return;
+  S.pb = { c: S.col, s: 0 }; S.pacc = 0; S.fire = 160; sfx.shot();
+  bulletsCross();
+}
+function move(d) {
+  if (S.mode !== 'play' || S.hurt > 0) return;
+  const n = Math.max(0, Math.min(4, S.col + d));
+  if (n !== S.col) { S.col = n; sfx.move(); }
+}
+
+function resolve(c) {
+  const o = S.slots[c];
+  if (!o || o.st === 'hit') { sfx.miss(); return; }
+  if (o.type === 'out') {
+    S.score += o.st === 'draw' ? 10 : o.st === 'aim' ? 5 : 2;
+    o.st = 'hit'; o.age = 0; sfx.kill();
+  } else {
+    o.st = 'hit'; o.age = 0; S.oops = true; hurt();
+  }
+}
+
+function stepPB() {
+  S.pb.s++;
+  if (bulletsCross()) return;
+  if (S.pb.s >= 3) { const c = S.pb.c; S.pb = null; resolve(c); }
+}
+function stepEB() {
+  for (let i = S.eb.length - 1; i >= 0; i--) {
+    const e = S.eb[i]; e.e++;
+    if (e.e >= 3) {
+      S.eb.splice(i, 1);
+      if (S.col === e.c && S.hurt <= 0) hurt();
+    }
+  }
+  bulletsCross();
+}
+
+function gameTick() {
+  sfx.tick();
+  const lv = level();
+  for (let c = 0; c < 5; c++) {
+    const o = S.slots[c]; if (!o) continue;
+    o.age++;
+    if (o.st === 'hit') { if (o.age >= 2) S.slots[c] = null; continue; }
+    if (o.type === 'civ') { if (o.age >= o.life) S.slots[c] = null; continue; }
+    if (o.st === 'draw' && o.age >= o.drawT) { o.st = 'aim'; o.age = 0; sfx.aim(); }
+    else if (o.st === 'aim' && o.age >= 1) { o.st = 'fired'; o.age = 0; S.eb.push({ c, e: 0 }); sfx.bang(); bulletsCross(); }
+    else if (o.st === 'fired' && o.age >= 2) {
+      S.slots[c] = null; S.miss++; sfx.miss();
+      if (S.miss >= 3) { S.miss = 0; hurt(); return; }
+    }
+  }
+  const active = S.slots.filter(Boolean).length;
+  const maxA = Math.min(3, 1 + Math.floor(lv / 3));
+  if (active < maxA && Math.random() < 0.55) {
+    const empty = [0, 1, 2, 3, 4].filter(i => !S.slots[i]);
+    const c = empty[Math.floor(Math.random() * empty.length)];
+    S.slots[c] = Math.random() < 0.27
+      ? { type: 'civ', st: 'idle', age: 0, life: 3 + Math.floor(Math.random() * 3) }
+      : { type: 'out', st: 'draw', age: 0, drawT: Math.max(1, 4 - Math.floor(lv / 2)) };
+    sfx.appear();
+  }
+}
+
+function update(dt) {
+  S.t += dt;
+  if (S.mode !== 'play') return;
+  if (S.fire > 0) S.fire -= dt;
+  if (S.hurt > 0) {
+    S.hurt -= dt;
+    if (S.hurt <= 0) {
+      if (S.lives <= 0) return gameOver();
+      S.slots.fill(null); S.eb = []; S.pb = null; S.acc = 0; S.oops = false;
+    }
+    return;
+  }
+  S.acc += dt; S.eacc += dt;
+  if (S.pb) { S.pacc += dt; if (S.pacc >= 65) { S.pacc -= 65; stepPB(); } }
+  if (S.hurt > 0) return;
+  if (S.eacc >= 115) { S.eacc -= 115; stepEB(); }
+  if (S.hurt > 0) return;
+  const tm = tickMs();
+  if (S.acc >= tm) { S.acc -= tm; gameTick(); }
+}
+
+// ---------- drawing ----------
+function seg(on, fn) { ctx.globalAlpha = on ? 1 : GHOST; ctx.fillStyle = ctx.strokeStyle = INK; fn(); ctx.globalAlpha = 1; }
+function poly(pts) { ctx.beginPath(); ctx.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]); ctx.closePath(); ctx.fill(); }
+function star(x, y, r1, r2, n) {
+  const p = []; for (let i = 0; i < n * 2; i++) { const a = i * Math.PI / n - Math.PI / 2, r = i % 2 ? r2 : r1; p.push(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+  poly(p);
+}
+
+function drawPrinted() {
+  ctx.save(); ctx.strokeStyle = PRINT; ctx.fillStyle = PRINT; ctx.globalAlpha = 0.45; ctx.lineWidth = 2;
+  // false-front roof
+  ctx.beginPath(); ctx.moveTo(20, 196); ctx.lineTo(20, 40); ctx.lineTo(90, 40); ctx.lineTo(110, 34); ctx.lineTo(370, 34); ctx.lineTo(390, 40); ctx.lineTo(460, 40); ctx.lineTo(460, 196); ctx.stroke();
+  // sign
+  ctx.strokeRect(198, 48, 84, 32);
+  ctx.font = 'bold 15px Georgia,serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('SALOON', 240, 65);
+  // upstairs windows
+  [155, 325].forEach(x => { ctx.strokeRect(x - 30, 44, 60, 54); ctx.fillRect(x - 34, 96, 68, 4); });
+  // balcony
+  ctx.beginPath(); ctx.moveTo(30, 104); ctx.lineTo(450, 104); ctx.moveTo(30, 114); ctx.lineTo(450, 114); ctx.stroke();
+  for (let x = 40; x <= 440; x += 20) { if (Math.abs(x - 155) < 26 || Math.abs(x - 325) < 26) continue; ctx.beginPath(); ctx.moveTo(x, 104); ctx.lineTo(x, 114); ctx.stroke(); }
+  // ground windows
+  [70, 410].forEach(x => { ctx.strokeRect(x - 30, 128, 60, 54); ctx.fillRect(x - 34, 180, 68, 4); });
+  // door frame + batwings
+  ctx.strokeRect(208, 120, 64, 76);
+  ctx.globalAlpha = 0.22;
+  ctx.fillRect(211, 150, 27, 26); ctx.fillRect(242, 150, 27, 26);
+  ctx.globalAlpha = 0.45;
+  // posts
+  [30, 450].forEach(x => { ctx.beginPath(); ctx.moveTo(x, 114); ctx.lineTo(x, 196); ctx.stroke(); });
+  // boardwalk & street
+  ctx.beginPath(); ctx.moveTo(10, 196); ctx.lineTo(470, 196); ctx.stroke();
+  ctx.globalAlpha = 0.18;
+  for (let x = 0; x < 480; x += 24) { ctx.beginPath(); ctx.moveTo(x, 196); ctx.lineTo(x, 202); ctx.stroke(); }
+  // cactus & tumbleweed decorations
+  ctx.globalAlpha = 0.3;
+  ctx.fillRect(458, 238, 8, 50); ctx.fillRect(448, 252, 6, 18); ctx.fillRect(448, 252, 12, 5); ctx.fillRect(468, 246, 6, 16); ctx.fillRect(464, 258, 10, 5);
+  ctx.beginPath(); ctx.arc(18, 292, 10, 0, Math.PI * 2); ctx.stroke(); ctx.beginPath(); ctx.arc(18, 292, 5, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawOutlaw(x, y, on) {
+  seg(on.body, () => {
+    ctx.fillRect(x - 17, y - 36, 34, 4);
+    poly([x - 10, y - 36, x - 8, y - 47, x, y - 44, x + 8, y - 47, x + 10, y - 36]);
+    ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y - 24, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillRect(x - 4, y - 27, 2, 3); ctx.fillRect(x + 2, y - 27, 2, 3);
+    poly([x - 10, y - 23, x + 10, y - 23, x, y - 11]);
+    poly([x - 13, y - 13, x + 13, y - 13, x + 11, y + 2, x - 11, y + 2]);
+  });
+  seg(on.armDown, () => { ctx.fillRect(x + 13, y - 12, 5, 13); ctx.fillRect(x + 12, y + 0, 8, 5); });
+  seg(on.armUp, () => {
+    poly([x + 12, y - 13, x + 17, y - 15, x + 24, y - 25, x + 19, y - 27]);
+    ctx.fillRect(x + 17, y - 35, 10, 9);
+    ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x + 22, y - 30.5, 3, 0, Math.PI * 2); ctx.globalAlpha *= 1; ctx.stroke();
+  });
+  seg(on.flash, () => star(x + 22, y - 31, 15, 6, 6));
+}
+
+function drawCiv(x, y, on) {
+  seg(on, () => {
+    // bowler hat
+    ctx.beginPath(); ctx.arc(x, y - 33, 8, Math.PI, 0); ctx.fill(); ctx.fillRect(x - 12, y - 34, 24, 3);
+    ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y - 23, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillRect(x - 4, y - 26, 2, 2); ctx.fillRect(x + 2, y - 26, 2, 2);
+    ctx.beginPath(); ctx.arc(x, y - 22, 4, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+    // bow tie
+    poly([x, y - 12, x - 6, y - 16, x - 6, y - 8]); poly([x, y - 12, x + 6, y - 16, x + 6, y - 8]);
+    // shirt (hollow)
+    ctx.strokeRect(x - 12, y - 13, 24, 15);
+    // beer mug
+    ctx.strokeRect(x - 27, y - 18, 9, 12); ctx.beginPath(); ctx.arc(x - 18, y - 12, 4, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+    ctx.fillRect(x - 18, y - 9, 6, 3);
+  });
+}
+
+function drawBurst(x, y, on) {
+  seg(on, () => { star(x, y - 22, 24, 9, 8); });
+}
+
+function bulletY(c, pos) { const a = SLOT_Y[c] + 12; return a + (BULLET_FROM - a) * (1 - (pos + 1) / 4); }
+function drawBullet(c, pos, on) {
+  const x = COLS[c], y = bulletY(c, pos);
+  seg(on, () => { ctx.fillRect(x - 2, y - 5, 4, 10); });
+}
+
+function drawPlayer(c, on, armUp, armDown) {
+  const x = COLS[c], y = 318;
+  seg(on, () => {
+    ctx.beginPath(); ctx.ellipse(x, y - 56, 20, 4, 0, 0, Math.PI * 2); ctx.fill();
+    poly([x - 10, y - 57, x - 8, y - 66, x, y - 63, x + 8, y - 66, x + 10, y - 57]);
+    ctx.beginPath(); ctx.arc(x, y - 46, 8, 0, Math.PI * 2); ctx.fill();
+    poly([x - 7, y - 40, x + 7, y - 40, x + 16, y - 33, x + 14, y, x - 14, y, x - 16, y - 33]);
+    ctx.fillRect(x - 22, y - 32, 6, 22);
+  });
+  seg(armDown, () => { ctx.fillRect(x + 16, y - 32, 6, 22); ctx.fillRect(x + 15, y - 12, 9, 6); });
+  seg(armUp, () => {
+    ctx.fillRect(x + 15, y - 66, 6, 34); ctx.fillRect(x + 13, y - 78, 6, 13);
+    star(x + 16, y - 84, 10, 4, 6);
+  });
+}
+
+const SEGS = { 0: 'abcdef', 1: 'bc', 2: 'abged', 3: 'abgcd', 4: 'fgbc', 5: 'afgcd', 6: 'afgedc', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
+function digit(x, y, w, h, d) {
+  const t = 3, hh = h / 2;
+  const s = { a: [x + t, y, w - 2 * t, t], b: [x + w - t, y + t, t, hh - t], c: [x + w - t, y + hh, t, hh - t],
+    d: [x + t, y + h - t, w - 2 * t, t], e: [x, y + hh, t, hh - t], f: [x, y + t, t, hh - t], g: [x + t, y + hh - t / 2, w - 2 * t, t] };
+  for (const k in s) seg(d != null && SEGS[d].includes(k), () => ctx.fillRect(...s[k]));
+}
+function number(n, x, y, digits, w = 14, h = 24) {
+  const str = String(Math.min(n, 10 ** digits - 1)).padStart(digits, ' ');
+  for (let i = 0; i < digits; i++) digit(x + i * (w + 4), y, w, h, str[i] === ' ' ? null : +str[i]);
+}
+function label(txt, x, y, on, size = 11) {
+  seg(on, () => { ctx.font = `bold ${size}px "Courier New",monospace`; ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText(txt, x, y); });
+}
+function hatIcon(x, y, on) { seg(on, () => { ctx.fillRect(x - 9, y + 6, 18, 3); poly([x - 6, y + 6, x - 5, y - 2, x, y, x + 5, y - 2, x + 6, y + 6]); }); }
+function xIcon(x, y, on) { seg(on, () => { ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5); ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke(); }); }
+
+function render(now) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#c6c9a8'); g.addColorStop(1, '#aeb595');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  drawPrinted();
+
+  const play = S.mode === 'play' || S.mode === 'over';
+  const blink = Math.floor(now / 220) % 2 === 0;
+  const demoAll = S.mode === 'title' && Math.floor(now / 1200) % 3 === 0;
+
+  for (let c = 0; c < 5; c++) {
+    const o = play ? S.slots[c] : null, x = COLS[c], y = SLOT_Y[c];
+    const out = !!(o && o.type === 'out' && o.st !== 'hit');
+    drawCiv(x, y, demoAll || !!(o && o.type === 'civ' && o.st !== 'hit'));
+    drawOutlaw(x, y, {
+      body: demoAll || out,
+      armDown: demoAll || (out && o.st === 'draw' && !(o.st === 'draw' && o.age === o.drawT - 1 && blink)),
+      armUp: demoAll || (out && (o.st === 'aim' || o.st === 'fired')),
+      flash: demoAll || (out && o.st === 'fired' && o.age === 0),
+    });
+    drawBurst(x, y, demoAll || !!(o && o.st === 'hit'));
+    for (let p = 0; p < 3; p++) {
+      const lit = play && ((S.pb && S.pb.c === c && S.pb.s === p) || S.eb.some(e => e.c === c && 2 - e.e === p));
+      drawBullet(c, p, demoAll || !!lit);
+    }
+    const here = play && S.col === c && !(S.hurt > 0 && !blink);
+    drawPlayer(c, demoAll || here, demoAll || (here && S.fire > 0), demoAll || (here && !(S.fire > 0)));
+  }
+
+  // HUD
+  for (let i = 0; i < 3; i++) hatIcon(18 + i * 24, 14, demoAll || (play && i < S.lives));
+  label('MISS', 92, 4, demoAll || (play && S.miss > 0), 10);
+  for (let i = 0; i < 3; i++) xIcon(100 + i * 16, 24, demoAll || (play && i < S.miss));
+  const showHi = S.mode !== 'play';
+  label('HI', 336, 8, demoAll || showHi, 11);
+  number(demoAll ? 8888 : (showHi && (S.mode === 'title' || Math.floor(now / 1500) % 2) ? HI : (S.score || 0)), 392, 5, 4);
+  label('GAME A', 170, 4, demoAll || (play ? !S.gameB : (S.mode === 'title' && blink)), 11);
+  label('GAME B', 246, 4, demoAll || (play ? S.gameB : (S.mode === 'title' && !blink)), 11);
+  label('GAME OVER', 186, 222, demoAll || (S.mode === 'over' && blink), 16);
+  label('OOPS!', 214, 204, demoAll || (play && S.oops && blink), 12);
+}
+
+// ---------- loop & input ----------
+let last = performance.now();
+function loop(now) { const dt = Math.min(100, now - last); last = now; update(dt); render(now); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+
+function start(b) { newGame(b); }
+function onFire() { if (S.mode === 'over' && S.t > 900) newGame(S.gameB); else fire(); }
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'arrowleft') move(-1);
+  else if (k === 'arrowright') move(1);
+  else if (k === ' ' || k === 'z' || k === 'arrowup') { if (!e.repeat) onFire(); }
+  else if (k === 'a') start(false);
+  else if (k === 'b') start(true);
+  else return;
+  e.preventDefault();
+});
+function bind(id, fn) {
+  const el = document.getElementById(id);
+  el.addEventListener('pointerdown', e => { e.preventDefault(); el.classList.add('down'); fn(); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(t => el.addEventListener(t, () => el.classList.remove('down')));
+}
+bind('bL', () => move(-1)); bind('bR', () => move(1)); bind('bF', onFire);
+bind('bA', () => start(false)); bind('bB', () => start(true));
+})();
+</script>
+</body>
+</html>
